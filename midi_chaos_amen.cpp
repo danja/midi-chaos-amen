@@ -22,7 +22,8 @@ enum PortIndex {
     COWBELL_VELOCITY  = 8,
     TOM_LOW_VELOCITY  = 9,
     TOM_MID_VELOCITY  = 10,
-    TOM_HIGH_VELOCITY = 11
+    TOM_HIGH_VELOCITY = 11,
+    SPARSITY          = 12
 };
 
 // MIDI drum notes (GM standard, channel 10)
@@ -86,6 +87,10 @@ private:
     const float* tom_low_velocity;
     const float* tom_mid_velocity;
     const float* tom_high_velocity;
+    const float* sparsity;
+    
+    // Sparsity tracking - which drum types were triggered on input
+    bool active_drums[7];
     
     // Default values for safety
     float default_chaos_k;
@@ -198,6 +203,10 @@ public:
         tom_low_velocity = nullptr;
         tom_mid_velocity = nullptr;
         tom_high_velocity = nullptr;
+        sparsity = nullptr;
+        
+        // Initialize sparsity tracking
+        memset(active_drums, 0, sizeof(active_drums));
         
         // Get URID map - critical for operation
         if (features) {
@@ -235,6 +244,7 @@ public:
     
     // Safe parameter getters with null checks
     bool getLearnMode() { return learn_mode ? (*learn_mode > 0.5f) : false; }
+    bool getSparsity() { return sparsity ? (*sparsity > 0.5f) : false; }
     float getChaosK() { return chaos_k ? *chaos_k : default_chaos_k; }
     float getChaosIntensity() { return chaos_intensity ? *chaos_intensity : default_chaos_intensity; }
     uint8_t getKickVelocity() { return kick_velocity ? (uint8_t)*kick_velocity : (uint8_t)default_kick_velocity; }
@@ -274,21 +284,25 @@ public:
             case TOM_LOW_VELOCITY: tom_low_velocity = (const float*)data; break;
             case TOM_MID_VELOCITY: tom_mid_velocity = (const float*)data; break;
             case TOM_HIGH_VELOCITY: tom_high_velocity = (const float*)data; break;
+            case SPARSITY: sparsity = (const float*)data; break;
         }
     }
     
     void run(uint32_t n_samples) {
         if (!midi_in || !midi_out || !map) return;
         
+        // Clear sparsity tracking for this cycle
+        memset(active_drums, 0, sizeof(active_drums));
+        
         // Check learn mode state change
         bool should_learn = getLearnMode();
+        bool sparse_mode = getSparsity();
+        
         if (should_learn && !learning_active) {
-            // Start learning
             learning_active = true;
             learn_step = 0;
             clearLearnedPattern();
         } else if (!should_learn && learning_active) {
-            // Stop learning
             learning_active = false;
         }
         
@@ -309,19 +323,27 @@ public:
                 
                 // Handle note on for chaos trigger
                 if ((msg[0] & 0xF0) == 0x90 && msg[2] > 0) {
+                    // Track which drum types are active (for sparsity)
+                    int input_drum = getDrumIndex(msg[1]);
+                    if (input_drum >= 0) {
+                        active_drums[input_drum] = true;
+                    }
+                    
                     // Learn from incoming notes
                     if (learning_active && (msg[0] & 0x0F) == 9) {
-                        int drum_idx = getDrumIndex(msg[1]);
-                        if (drum_idx >= 0) {
-                            learned_pattern[drum_idx][current_step] = true;
+                        if (input_drum >= 0) {
+                            learned_pattern[input_drum][current_step] = true;
                         }
                     }
                     
                     // Trigger chaotic pattern step
                     for (int drum = 0; drum < 7; drum++) {
                         if (current_pattern[drum][current_step]) {
-                            writeMidiNote(&forge, ev->time.frames, drum_notes[drum], 
-                                        getVelocityForDrum(drum), true);
+                            // Sparsity check: only output if this drum type was triggered on input
+                            if (!sparse_mode || active_drums[drum]) {
+                                writeMidiNote(&forge, ev->time.frames, drum_notes[drum], 
+                                            getVelocityForDrum(drum), true);
+                            }
                         }
                     }
                     
