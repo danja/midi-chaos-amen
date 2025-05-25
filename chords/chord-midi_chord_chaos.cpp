@@ -17,7 +17,8 @@ enum PortIndex {
     CHAOS_INTENSITY = 3,
     CHORD_VELOCITY  = 4,
     CHORD_CHANNEL   = 5,
-    STRANGE_KEY_SHIFT = 6
+    STRANGE_KEY_SHIFT = 6,
+    SPARSITY        = 7
 };
 
 typedef struct {
@@ -53,6 +54,7 @@ private:
     const float* chord_velocity;
     const float* chord_channel;
     const float* strange_key_shift;
+    const float* sparsity;
     
     // Active notes for chord off
     bool active_chords[128];
@@ -151,6 +153,10 @@ private:
         return strange_key_shift ? (*strange_key_shift > 0.5f) : false;
     }
     
+    float getSparsity() {
+        return sparsity ? fmax(0.0f, fmin(1.0f, *sparsity)) : 0.0f;
+    }
+    
     uint8_t getChordVelocity() {
         return chord_velocity ? (uint8_t)fmax(1, fmin(127, *chord_velocity)) : 80;
     }
@@ -180,12 +186,17 @@ private:
     void writeChord(LV2_Atom_Forge* forge, uint32_t frames, uint8_t root, bool note_on) {
         if (!forge) return;
         
-        int chord_type = selectChordType();
-        int inversion = selectInversion();
-        uint8_t channel = getChordChannel();
-        uint8_t velocity = note_on ? getChordVelocity() : 0;
-        
         if (note_on) {
+            // Check sparsity - maybe don't play anything
+            float sparse_level = getSparsity();
+            generateChaos();
+            if (chaos_x < sparse_level) return; // Skip this chord
+            
+            int chord_type = selectChordType();
+            int inversion = selectInversion();
+            uint8_t channel = getChordChannel();
+            uint8_t velocity = getChordVelocity();
+            
             // Generate chord notes
             int chord_notes[4];
             int chord_size = 0;
@@ -201,6 +212,14 @@ private:
                 }
                 
                 chord_notes[chord_size++] = note;
+            }
+            
+            // Sparsity affects chord density
+            generateChaos();
+            if (sparse_level > 0.3 && chaos_x < sparse_level * 0.8) {
+                // Arpeggio mode - play only 1-2 notes
+                int notes_to_play = (chaos_x < 0.5) ? 1 : 2;
+                chord_size = (notes_to_play < chord_size) ? notes_to_play : chord_size;
             }
             
             // Optimize voice leading
@@ -224,6 +243,7 @@ private:
             }
         } else {
             // Note off - stop active chord notes
+            uint8_t channel = getChordChannel();
             for (int i = 0; i < 128; i++) {
                 if (active_chords[i]) {
                     uint8_t midi_msg[3] = {(uint8_t)(0x80 | (channel & 0x0F)), (uint8_t)i, 0};
@@ -249,6 +269,7 @@ public:
         chord_velocity = nullptr;
         chord_channel = nullptr;
         strange_key_shift = nullptr;
+        sparsity = nullptr;
         
         memset(active_chords, 0, sizeof(active_chords));
         
@@ -288,6 +309,7 @@ public:
             case CHORD_VELOCITY: chord_velocity = (const float*)data; break;
             case CHORD_CHANNEL: chord_channel = (const float*)data; break;
             case STRANGE_KEY_SHIFT: strange_key_shift = (const float*)data; break;
+            case SPARSITY: sparsity = (const float*)data; break;
         }
     }
     
